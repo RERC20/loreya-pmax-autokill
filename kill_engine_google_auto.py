@@ -33,7 +33,7 @@ from zoneinfo import ZoneInfo
 
 # reuse the EXACT feed + rules + Shopify write + logging from the existing engines
 from kill_engine_google import build_feed, PMAX_CAMPAIGN_ID as WINNERS_CAMPAIGN_ID, TESTING_CAMPAIGN_IDS
-SINGLE_CAMPAIGN = bool(getattr(SC, 'SINGLE_CAMPAIGN', False))   # owner 2026-10-30: everything serves in Testing
+SINGLE_CAMPAIGN = bool(getattr(__import__('store_config'), 'SINGLE_CAMPAIGN', False))   # owner 2026-10-30: everything serves in Testing
 from kill_engine_v4 import evaluate, shopify_token, shopify_draft, _Tee, SHOP, SHOP_API
 from creds import cred                          # env -> _secrets_local.py -> '' (so local testing works too)
 
