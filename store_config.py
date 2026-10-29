@@ -22,6 +22,11 @@ PROVEN_CAMPAIGN_ID = None            # LolaLooks "PMax | Champions | UK" equival
 PROVEN_AG_ID = None
 LC_CAMPAIGN_ID = None                # LolaLooks "PMax | Last Chance | UK" equivalent
 BESTSELLER_COLLECTION_ID = None      # manual Best Sellers collection (None = not used)
+# ONE-CAMPAIGN MODE (owner 2026-10-30): the Winners campaign is PAUSED and the Testing campaign's product tree is
+# "include everything", so every product - unsold and sold - serves in Testing. A product's first sale still tags it
+# w_campaign (Testing's no-sale tiers stop judging it) but it is NOT moved anywhere: the winner pace rule now judges it
+# on the Testing spend it takes AFTER its sale, so a seller can't over-spend and drag the blended down.
+SINGLE_CAMPAIGN = True
 LADDER_COMPLETE = all([RISING_CAMPAIGN_ID, RISING_AG_ID, PROVEN_CAMPAIGN_ID, PROVEN_AG_ID, LC_CAMPAIGN_ID])
 
 # DRY until the repo variable ENGINE_LIVE is set to 1 (Settings -> Secrets and variables -> Actions -> Variables)

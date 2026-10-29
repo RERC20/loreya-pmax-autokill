@@ -32,7 +32,8 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 from zoneinfo import ZoneInfo
 
 # reuse the EXACT feed + rules + Shopify write + logging from the existing engines
-from kill_engine_google import build_feed, PMAX_CAMPAIGN_ID as WINNERS_CAMPAIGN_ID
+from kill_engine_google import build_feed, PMAX_CAMPAIGN_ID as WINNERS_CAMPAIGN_ID, TESTING_CAMPAIGN_IDS
+SINGLE_CAMPAIGN = bool(getattr(SC, 'SINGLE_CAMPAIGN', False))   # owner 2026-10-30: everything serves in Testing
 from kill_engine_v4 import evaluate, shopify_token, shopify_draft, _Tee, SHOP, SHOP_API
 from creds import cred                          # env -> _secrets_local.py -> '' (so local testing works too)
 
@@ -595,7 +596,8 @@ def _tier_daily_spend(run_date, pids, lookback_d=None):
     q = (f"SELECT campaign.id, segments.date, segments.product_item_id, metrics.cost_micros "
          f"FROM shopping_performance_view "
          f"WHERE segments.date BETWEEN '{start}' AND '{run_date.isoformat()}' "
-         "AND campaign.id IN (" + ",".join(str(x) for x in (WINNERS_CAMPAIGN_ID, CHAMPIONS_CAMPAIGN_ID, LC_CAMPAIGN_ID) if x)
+         "AND campaign.id IN (" + ",".join(str(x) for x in ((WINNERS_CAMPAIGN_ID, CHAMPIONS_CAMPAIGN_ID, LC_CAMPAIGN_ID)
+                                                          + (tuple(TESTING_CAMPAIGN_IDS) if SINGLE_CAMPAIGN else ())) if x)   # one-campaign mode: a seller's post-sale Testing spend is judged
          + ") AND metrics.cost_micros > 0")   # STORE KIT: only the campaigns this store has
     out = collections.defaultdict(list)
     rows = _ads_search(ga, gt, q)
@@ -696,7 +698,7 @@ def ads_remove_winner_item_nodes(pids):
     Item-id includes serve regardless of feed label, so a pace-killed product must
     have its nodes swept or it keeps serving in Winners. WARN-only on failure —
     the exclusion is belt-and-braces (label alone routes GMC within hours)."""
-    if not pids: return
+    if not pids or SINGLE_CAMPAIGN: return   # one-campaign mode: nothing is routed into Winners any more
     try:
         import google_ads_connect as ga
         gt = ga.get_access_token()
@@ -1871,7 +1873,7 @@ def main():
         exempt = sum(1 for p in feed if WINNER_TAG in p['tags'])
         print(f"winners: +{len(new_winners)} newly tagged | {exempt} total exempt from kill rules")
         fp_err = None
-        if new_winners and not dry and WINNERS_AG_ID:
+        if new_winners and not dry and WINNERS_AG_ID and not SINGLE_CAMPAIGN:   # one-campaign mode: sellers stay in Testing
             _, fp_err = ads_fast_path(new_winners, shopify_token())   # instant campaign move (label = backup)
 
         # BEST SELLERS: every active winner belongs to the storefront collection (add-only)
@@ -1970,7 +1972,8 @@ def main():
             tg += ("\n🏆 <b>new winners → w_campaign:</b> "
                    + ", ".join(f"<code>{p['pid']}</code>" for p in new_winners[:10])
                    + (f" +{len(new_winners)-10} more" if len(new_winners) > 10 else ""))
-            tg += ("\n⚡ moved to Winners campaign instantly" if not fp_err
+            tg += ("\n✅ stays in Testing - winner pace rule now guards its spend" if SINGLE_CAMPAIGN
+                   else "\n⚡ moved to Winners campaign instantly" if not fp_err
                    else f"\n⚠️ fast-path failed ({html.escape(fp_err[:80])}) — label moves it on next feed sync")
         if to_draft:
             DETAIL = 15                                     # full reason+metrics for up to 15; rest in the Excel
