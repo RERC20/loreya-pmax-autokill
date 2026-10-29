@@ -26,7 +26,7 @@
 #   RESEND_API_KEY  (free key from resend.com; twice-daily digest; signup inbox == EMAIL_TO)
 # Any unset channel is simply skipped (the run still drafts + logs).
 # ---------------------------------------------------------------------------
-import sys, os, csv, base64, html, datetime, collections, requests
+import sys, os, csv, base64, html, datetime, collections, requests, json
 from openpyxl import Workbook
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 from zoneinfo import ZoneInfo
@@ -485,11 +485,40 @@ WINNER_KILL_CAP   = 10                             # >N winner kills in one run 
 WINNER_POOL_ALERT = 25                             # warn when the winner pool drops below this
 WINNER_KILLS_LOG  = 'winner_kills_log.csv'
 
+# ── SALE-TIME SPEND WINDOW (owner 2026-10-30: "not from the day after - from the same time it gets the sale") ──────
+# Google reports product spend per DAY only (segments.hour is refused on shopping_performance_view), so the moment of
+# a sale is caught with a snapshot: the first engine run after a sale (every 20 min) stores that product's spend so
+# far on the sale day in the product metafield autokill.sale_spend_base = {sale_ts: spend}. Spend after the sale =
+# (sale-day spend - snapshot) + every later day. Google posts today's spend with a lag, so spend made shortly BEFORE
+# the sale can land after the snapshot and count as after it - that errs toward a tighter allowance, never a leak.
+# No snapshot (sold before this rule, or no run that day): the sale day's spend is split by the clock - the share of
+# the day still left at the sale time counts.
+SALE_BASE_NS, SALE_BASE_KEY = 'autokill', 'sale_spend_base'
+
+def _parse_bases(v):
+    try:
+        d = json.loads(v) if v else {}
+        return {str(k): float(x) for k, x in d.items()} if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+def _spent_since_sale(rows, sale, bases):
+    """Spend after `sale` (dict ts/date): every day after the sale day + the sale day's spend after the sale moment."""
+    d = sale['date']
+    after = sum(v for dd, v in rows if dd > d)
+    sday = sum(v for dd, v in rows if dd == d)
+    b = bases.get(sale['ts'])
+    if b is None:
+        t = datetime.datetime.fromisoformat(sale['ts'].replace('Z', '+00:00')).astimezone(ACC)
+        b = sday * ((t.hour * 3600 + t.minute * 60 + t.second) / 86400.0)
+    return after + max(0.0, sday - b)
+
 def _winner_products(tok):
     """Live winners (ACTIVE + w_campaign) -> {pid: {name, price}} (min variant price)."""
     Q = ('query($c:String){products(first:250,after:$c,query:"tag:w_campaign status:active"){'
          'pageInfo{hasNextPage endCursor} edges{node{legacyResourceId title tags '
-         'priceRangeV2{minVariantPrice{amount}}}}}}')
+         'priceRangeV2{minVariantPrice{amount}} '
+         'mf:metafield(namespace:"autokill",key:"sale_spend_base"){value}}}}}')
     out = {}; cur = None
     while True:
         j = _shopify_read(tok, Q, {'c': cur}, timeout=60)   # v7.2: retried read
@@ -499,7 +528,8 @@ def _winner_products(tok):
             out[str(n['legacyResourceId'])] = dict(
                 name=n.get('title', ''),
                 price=float((n.get('priceRangeV2') or {}).get('minVariantPrice', {}).get('amount') or 0),
-                tags=[str(t) for t in (n.get('tags') or [])])                  # v7.5: for the Last Chance restart stamp
+                tags=[str(t) for t in (n.get('tags') or [])],                  # v7.5: for the Last Chance restart stamp
+                bases=_parse_bases((n.get('mf') or {}).get('value')))          # sale-time spend snapshots (2026-10-30)
         if c['pageInfo']['hasNextPage']: cur = c['pageInfo']['endCursor']
         else: break
     return out
@@ -1163,18 +1193,37 @@ def winner_pace_run(run_date, dry, life=None, shared=None, skip=None, exclude=No
                 anchor = slist[-3]['date'] if len(slist) >= 3 else slist[-2]['date']
                 rev2 = slist[-1]['rev'] + slist[-2]['rev']
                 allow = max(rev2, m['price']) / WINNER_PACE_ROAS
-                spent = sum(v for d, v in spend.get(pid, ()) if d > anchor)
-                opened = f"last-2 £{rev2:.2f}, window since {anchor}"
+                a_sale = slist[-3] if len(slist) >= 3 else slist[-2]
+                spent = _spent_since_sale(spend.get(pid, ()), a_sale, m.get('bases') or {})
+                opened = f"last-2 £{rev2:.2f}, window since {a_sale['ts'][:16]}Z"
             elif len(slist) == 1:
                 allow = max(slist[0]['rev'], m['price']) / WINNER_PACE_ROAS
-                spent = sum(v for d, v in spend.get(pid, ()) if d > slist[0]['date'])
-                opened = f"sale £{slist[0]['rev']:.2f} on {slist[0]['date']}"
+                spent = _spent_since_sale(spend.get(pid, ()), slist[0], m.get('bases') or {})
+                opened = f"sale £{slist[0]['rev']:.2f} at {slist[0]['ts'][:16]}Z"
             else:   # no lifetime sale on record — allowance from price, spend from whole window
                 allow = m['price'] / WINNER_PACE_ROAS
                 spent = sum(v for _, v in spend.get(pid, ()))
                 opened = f"no sale on record (price £{m['price']:.2f})"
             rows.append(dict(pid=pid, name=m['name'], allow=allow, spent=spent, opened=opened,
                              pct=(spent / allow * 100) if allow > 0 else 0.0))
+        if not dry:
+            snap = 0
+            for pid, m in winners.items():
+                bases = dict(m.get('bases') or {})
+                new = False
+                for sale in life.get(pid, [])[-3:]:
+                    if sale['ts'] not in bases and sale['date'] == run_date.isoformat():
+                        bases[sale['ts']] = round(sum(v for dd, v in spend.get(pid, ()) if dd == sale['date']), 4)
+                        new = True
+                if new:
+                    keep = dict(sorted(bases.items())[-6:])
+                    r = _shopify_write(tok, 'mutation($mf:[MetafieldsSetInput!]!){metafieldsSet(metafields:$mf){userErrors{message}}}',
+                                       {'mf': [{'ownerId': f"gid://shopify/Product/{pid}", 'namespace': SALE_BASE_NS,
+                                                'key': SALE_BASE_KEY, 'type': 'json', 'value': json.dumps(keep)}]},
+                                       'metafieldsSet')
+                    snap += (r == 'ok')
+            if snap:
+                print(f"  sale-time snapshots stored: {snap}")
         rows.sort(key=lambda x: -x['pct'])
         res['closest'] = [r for r in rows if 60 <= r['pct'] <= 100][:5]
         flagged = [r for r in rows if r['spent'] > r['allow']]
