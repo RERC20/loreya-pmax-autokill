@@ -1881,6 +1881,14 @@ def main():
     run_date = datetime.datetime.now(ACC).date()
     is_monday = (run_date.weekday() == 0)
     ts = datetime.datetime.now(UK).strftime('%Y-%m-%d %H:%M:%S')
+    # DRAFT DAY (owner 2026-10-30): products are drafted ONCE A WEEK, on Monday (UK). Every other day the engine still
+    # runs (tags new sellers, syncs labels, reports what it WOULD draft) but drafts nothing - testing kills, winner pace
+    # and Last Chance are previews - so the campaign is not changed daily while it learns. Repo variable DRAFT_WEEKDAYS
+    # overrides the days (0=Mon .. 6=Sun, comma-separated, e.g. "0,3"); "all" restores daily drafting.
+    _dd = (os.environ.get('DRAFT_WEEKDAYS') or '0').strip().lower()   # unset or empty -> Monday
+    draft_days = set(range(7)) if _dd == 'all' else {int(x) for x in _dd.replace(' ', '').split(',') if x.isdigit()}
+    draft_day = datetime.datetime.now(UK).weekday() in draft_days
+    hold = not draft_day
 
     logf = open(RUN_LOG, 'a', encoding='utf-8')
     logf.write(f"\n{'#'*72}\n# AUTO RUN {ts} (UK) | GOOGLE-DIRECT | {'DRY' if dry else 'LIVE'} | data-date {run_date}\n{'#'*72}\n")
@@ -1888,6 +1896,8 @@ def main():
     try:
         print(f"== kill_engine GOOGLE AUTO == {run_date} ({run_date.strftime('%A')}) | "
               f"Mon tiers 3&4 {'ON' if is_monday else 'OFF'} | {'DRY-RUN' if dry else 'LIVE'} | {ts}")
+        print(f"draft day: {'YES - drafting today' if draft_day else 'NO - drafts held until the next draft day'} "
+              f"(DRAFT_WEEKDAYS={_dd})")
         feed = build_feed(run_date)
         print(f"feed: Google Ads + live Shopify -> {len(feed)} active products")
 
@@ -1955,18 +1965,18 @@ def main():
               + (f" | !! {js['err']}" if js['err'] else ""))
 
         # WINNER PACE RULE (v11): judge the Winners campaign at 2.8-pace
-        w = (winner_pace_run(run_date, dry, life_sales, shared=(ch.get('spend_pids') or set(), ch.get('spend')),
+        w = (winner_pace_run(run_date, dry or hold, life_sales, shared=(ch.get('spend_pids') or set(), ch.get('spend')),
                             skip=ch.get('skip_pace'), exclude=ch.get('pace_exclude')) if WINNERS_CAMPAIGN_ID
              else dict(live=False, evaluated=0, flagged=[], killed=0, pool=0, err='off - no Rising campaign yet', closest=[]))   # STORE KIT
         print(f"winner pace ({WINNER_PACE_ROAS}): {w['evaluated']} evaluated | "
               f"{len(w['flagged'])} over allowance | killed {w['killed']} | "
-              f"{'LIVE' if w['live'] else ('DRY' if dry else 'dormant -> live ' + WINNER_KILL_START.isoformat())}"
+              f"{'LIVE' if w['live'] else ('DRY' if dry else 'HELD - draft day is Monday' if hold else 'dormant -> live ' + WINNER_KILL_START.isoformat())}"
               + (f" | !! {w['err']}" if w['err'] else ""))
         for r in w['closest']:
             print(f"  pace watch {r['pct']:.0f}%: {r['pid']} spent £{r['spent']:.2f} of £{r['allow']:.2f} ({r['opened']}) | {r['name'][:40]}")
 
         # LAST CHANCE rule (owner 2026-08-13): graduate/exit the lc pool
-        lc = (lc_run(run_date, dry, life_sales) if LC_CAMPAIGN_ID
+        lc = (lc_run(run_date, dry or hold, life_sales) if LC_CAMPAIGN_ID
               else dict(pool=0, graduated=[], drafted=[], err='off - no Last Chance campaign yet'))   # STORE KIT
         print(f"last chance: pool {lc['pool']} | graduated {len(lc['graduated'])} | "
               f"drafted {len(lc['drafted'])}" + (f" | !! {lc['err']}" if lc['err'] else ""))
@@ -1998,12 +2008,13 @@ def main():
         print(f"kills found: {len(kills)}")
         outcomes = {}
         if to_draft:
-            wtok = None if dry else shopify_token()
+            wtok = None if (dry or hold) else shopify_token()
             for p, tier, why in to_draft:
-                res = 'DRY (not drafted)' if dry else shopify_draft(wtok, p['pid'])
+                res = ('DRY (not drafted)' if dry else 'HELD (drafted on the next draft day)' if hold
+                       else shopify_draft(wtok, p['pid']))
                 outcomes[p['pid']] = res
-                print(f"  {'would draft' if dry else 'draft'} {p['pid']} [{tier}] -> {res} | {p['name'][:42]}")
-        drafted = 0 if dry else sum(1 for v in outcomes.values() if v == 'ok')
+                print(f"  {'would draft' if (dry or hold) else 'draft'} {p['pid']} [{tier}] -> {res} | {p['name'][:42]}")
+        drafted = 0 if (dry or hold) else sum(1 for v in outcomes.values() if v == 'ok')
 
         xlsx = build_report(to_draft, outcomes, run_date, ts, len(feed), len(kills), drafted, dry)
         print(f"report: {xlsx}")
@@ -2014,7 +2025,8 @@ def main():
 
         # TELEGRAM — every run: run stats + the .xlsx
         n = len(to_draft) if dry else drafted
-        tg = (f"🤖 <b>Auto-Kill</b> — {n} drafted{' (DRY)' if dry else ''}\n"
+        tg = (f"🤖 <b>Auto-Kill</b> — {n} drafted{' (DRY)' if dry else ''}"
+              + (f" · ⏸ draft day is Monday: {len(to_draft)} held" if hold and not dry else "") + "\n"
               f"{ts} UK · {run_date.strftime('%a')}\n"
               f"Active: {len(feed)} | winners exempt: {exempt} | kills found: {len(kills)} | drafted: {n}")
         if new_winners:
@@ -2039,7 +2051,7 @@ def main():
             tg += f"\n  🪦 <code>{g['pid']}</code> {html.escape(g['name'][:40])}"
         tg += (f"\n\n🎯 <b>Winners pace {WINNER_PACE_ROAS}</b>: {w['evaluated']} checked, "
                f"{len(w['flagged'])} over allowance"
-               + ("" if w['live'] else (" (DRY)" if dry else f" — dormant, live {WINNER_KILL_START.strftime('%d %b')}")))
+               + ("" if w['live'] else (" (DRY)" if dry else " (held - draft day is Monday)" if hold else f" — dormant, live {WINNER_KILL_START.strftime('%d %b')}")))
         for r in w['flagged'][:8]:
             tg += (f"\n🔻 <b>{html.escape(r['name'][:42])}</b> <code>{r['pid']}</code>\n"
                    f"   spent £{r['spent']:.2f} &gt; allowance £{r['allow']:.2f} ({html.escape(r['opened'])})"

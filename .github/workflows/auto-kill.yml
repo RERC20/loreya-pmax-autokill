@@ -94,6 +94,7 @@ jobs:
           TELEGRAM_CHAT_ID:         ${{ secrets.TELEGRAM_CHAT_ID }}
           PROVEN_BE_JSON:           ${{ secrets.PROVEN_BE_JSON }}
           ENGINE_LIVE:              ${{ vars.ENGINE_LIVE }}
+          DRAFT_WEEKDAYS:           ${{ vars.DRAFT_WEEKDAYS }}
         run: python kill_engine_google_auto.py
 
       - name: Save engine state
