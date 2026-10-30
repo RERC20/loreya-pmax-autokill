@@ -3,6 +3,7 @@
 import os
 
 STORE_LABEL = 'Loreya'
+STORE_TZ = 'Europe/London'                 # the Shopify store's time zone (owner 2026-10-30: weekly drafting = Monday 00:03 here)
 ACCOUNT_TZ = 'America/New_York'            # the Google Ads account's time zone (its segments.date days)
 ADS_CURRENCY = 'USD'                     # the ad account bills in this currency ...
 STORE_CURRENCY = 'GBP'                   # ... the store sells in this one (spend is converted to it)

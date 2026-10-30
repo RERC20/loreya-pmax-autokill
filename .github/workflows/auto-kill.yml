@@ -17,6 +17,8 @@ name: Loreya PMax Auto-Kill (20-min cadence)
 on:
   schedule:
     - cron: '11,31,51 * * * *'          # GitHub's scheduler is best-effort (it can skip ticks); an external cron hitting
+    - cron: '3 0 * * 1'          # weekly drafting: Monday 00:03 store time (winter, GMT)
+    - cron: '3 23 * * 0'          # weekly drafting: Monday 00:03 store time (summer, BST)
                                 # workflow_dispatch (as LolaLooks' cron-job.org job does) makes it exact.
   workflow_dispatch: {}
 
@@ -46,6 +48,7 @@ jobs:
             _api_calls.json
             _fx_cache.json
             _fx_rule_cache.json
+            _last_draft_day.txt
           key: engine-state-${{ github.run_id }}
           restore-keys: |
             engine-state-
@@ -58,7 +61,8 @@ jobs:
           now=$(date +%s)
           last=$(cat _last_run_epoch.txt 2>/dev/null || echo 0)
           age=$((now - last))
-          if [ "$age" -lt "$GATE_S" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+          case "${{ github.event.schedule }}" in "3 "*) DRAFT_TICK=1;; *) DRAFT_TICK=0;; esac   # the Monday 00:03 trigger always runs
+          if [ "$age" -lt "$GATE_S" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ "$DRAFT_TICK" = "0" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "tick skipped - last engine run ${age}s ago (< ${GATE_S}s)"
           else
@@ -109,4 +113,5 @@ jobs:
             _api_calls.json
             _fx_cache.json
             _fx_rule_cache.json
+            _last_draft_day.txt
           key: engine-state-${{ github.run_id }}

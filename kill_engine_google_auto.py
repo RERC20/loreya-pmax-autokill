@@ -50,6 +50,7 @@ TELEGRAM_CHAT  = cred('TELEGRAM_CHAT_ID')       # your numeric chat id (@userinf
 SUMMARY_HOURS  = (9, 21)                        # UK hours for the twice-a-day (every 12h) email digest
 RUN_LOG        = 'kill_engine_auto_runs.log'
 KILLS_LOG      = 'kills_log_auto.csv'
+DRAFT_MARK     = '_last_draft_day.txt'     # store date of the last weekly drafting pass (Actions cache)
 
 # ── Telegram kill formatting: plain-English tier + the rule's reason + core metrics ──
 TIER_LABEL = {
@@ -1881,13 +1882,21 @@ def main():
     run_date = datetime.datetime.now(ACC).date()
     is_monday = (run_date.weekday() == 0)
     ts = datetime.datetime.now(UK).strftime('%Y-%m-%d %H:%M:%S')
-    # DRAFT DAY (owner 2026-10-30): products are drafted ONCE A WEEK, on Monday (UK). Every other day the engine still
-    # runs (tags new sellers, syncs labels, reports what it WOULD draft) but drafts nothing - testing kills, winner pace
-    # and Last Chance are previews - so the campaign is not changed daily while it learns. Repo variable DRAFT_WEEKDAYS
-    # overrides the days (0=Mon .. 6=Sun, comma-separated, e.g. "0,3"); "all" restores daily drafting.
+    # DRAFT DAY (owner 2026-10-30): drafts happen ONCE A WEEK - on the first run at or after MONDAY 00:03 in the STORE's
+    # own time zone (store_config.STORE_TZ). The workflow has a dedicated Monday-00:03 trigger so that run is on time; a
+    # marker file (kept in the Actions cache) makes sure only one run per Monday drafts. Every other run holds its drafts
+    # (testing kills, winner pace and Last Chance are previews). Repo variable DRAFT_WEEKDAYS overrides the day(s)
+    # (0=Mon .. 6=Sun, e.g. "0,3"); "all" = every run drafts, as before.
+    store_tz = ZoneInfo(getattr(SC, 'STORE_TZ', 'Europe/London'))
+    now_store = datetime.datetime.now(store_tz)
     _dd = (os.environ.get('DRAFT_WEEKDAYS') or '0').strip().lower()   # unset or empty -> Monday
-    draft_days = set(range(7)) if _dd == 'all' else {int(x) for x in _dd.replace(' ', '').split(',') if x.isdigit()}
-    draft_day = datetime.datetime.now(UK).weekday() in draft_days
+    _done = open(DRAFT_MARK, encoding='utf-8').read().strip() if os.path.exists(DRAFT_MARK) else ''
+    if _dd == 'all':
+        draft_day = True
+    else:
+        draft_days = {int(x) for x in _dd.replace(' ', '').split(',') if x.isdigit()}
+        draft_day = (now_store.weekday() in draft_days and (now_store.hour, now_store.minute) >= (0, 3)
+                     and _done != now_store.date().isoformat())
     hold = not draft_day
 
     logf = open(RUN_LOG, 'a', encoding='utf-8')
@@ -1896,8 +1905,9 @@ def main():
     try:
         print(f"== kill_engine GOOGLE AUTO == {run_date} ({run_date.strftime('%A')}) | "
               f"Mon tiers 3&4 {'ON' if is_monday else 'OFF'} | {'DRY-RUN' if dry else 'LIVE'} | {ts}")
-        print(f"draft day: {'YES - drafting today' if draft_day else 'NO - drafts held until the next draft day'} "
-              f"(DRAFT_WEEKDAYS={_dd})")
+        print(f"draft day: {'YES - this run drafts' if draft_day else 'NO - drafts held until Monday 00:03 store time'} "
+              f"(store time {now_store:%a %Y-%m-%d %H:%M} {store_tz.key} | DRAFT_WEEKDAYS={_dd}"
+              + (f" | this week's drafting already done {_done}" if _done == now_store.date().isoformat() else "") + ")")
         feed = build_feed(run_date)
         print(f"feed: Google Ads + live Shopify -> {len(feed)} active products")
 
@@ -1970,7 +1980,7 @@ def main():
              else dict(live=False, evaluated=0, flagged=[], killed=0, pool=0, err='off - no Rising campaign yet', closest=[]))   # STORE KIT
         print(f"winner pace ({WINNER_PACE_ROAS}): {w['evaluated']} evaluated | "
               f"{len(w['flagged'])} over allowance | killed {w['killed']} | "
-              f"{'LIVE' if w['live'] else ('DRY' if dry else 'HELD - draft day is Monday' if hold else 'dormant -> live ' + WINNER_KILL_START.isoformat())}"
+              f"{'LIVE' if w['live'] else ('DRY' if dry else 'HELD - drafts Monday 00:03 store time' if hold else 'dormant -> live ' + WINNER_KILL_START.isoformat())}"
               + (f" | !! {w['err']}" if w['err'] else ""))
         for r in w['closest']:
             print(f"  pace watch {r['pct']:.0f}%: {r['pid']} spent £{r['spent']:.2f} of £{r['allow']:.2f} ({r['opened']}) | {r['name'][:40]}")
@@ -2015,6 +2025,8 @@ def main():
                 outcomes[p['pid']] = res
                 print(f"  {'would draft' if (dry or hold) else 'draft'} {p['pid']} [{tier}] -> {res} | {p['name'][:42]}")
         drafted = 0 if (dry or hold) else sum(1 for v in outcomes.values() if v == 'ok')
+        if draft_day and not dry and _dd != 'all':          # this Monday's drafting pass is done - later runs hold
+            with open(DRAFT_MARK, 'w', encoding='utf-8') as _f: _f.write(now_store.date().isoformat())
 
         xlsx = build_report(to_draft, outcomes, run_date, ts, len(feed), len(kills), drafted, dry)
         print(f"report: {xlsx}")
@@ -2026,7 +2038,7 @@ def main():
         # TELEGRAM — every run: run stats + the .xlsx
         n = len(to_draft) if dry else drafted
         tg = (f"🤖 <b>Auto-Kill</b> — {n} drafted{' (DRY)' if dry else ''}"
-              + (f" · ⏸ draft day is Monday: {len(to_draft)} held" if hold and not dry else "") + "\n"
+              + (f" · ⏸ drafts on Monday 00:03 store time: {len(to_draft)} held" if hold and not dry else "") + "\n"
               f"{ts} UK · {run_date.strftime('%a')}\n"
               f"Active: {len(feed)} | winners exempt: {exempt} | kills found: {len(kills)} | drafted: {n}")
         if new_winners:
@@ -2051,7 +2063,7 @@ def main():
             tg += f"\n  🪦 <code>{g['pid']}</code> {html.escape(g['name'][:40])}"
         tg += (f"\n\n🎯 <b>Winners pace {WINNER_PACE_ROAS}</b>: {w['evaluated']} checked, "
                f"{len(w['flagged'])} over allowance"
-               + ("" if w['live'] else (" (DRY)" if dry else " (held - draft day is Monday)" if hold else f" — dormant, live {WINNER_KILL_START.strftime('%d %b')}")))
+               + ("" if w['live'] else (" (DRY)" if dry else " (held - drafts Monday 00:03 store time)" if hold else f" — dormant, live {WINNER_KILL_START.strftime('%d %b')}")))
         for r in w['flagged'][:8]:
             tg += (f"\n🔻 <b>{html.escape(r['name'][:42])}</b> <code>{r['pid']}</code>\n"
                    f"   spent £{r['spent']:.2f} &gt; allowance £{r['allow']:.2f} ({html.escape(r['opened'])})"
